@@ -14,6 +14,14 @@ description: 只读扫描 Windows 系统盘（C:）垃圾并按「可安全删�
 
 ## 1. 扫描
 
+### 扫描前必须先告知用户
+
+运行扫描前，先明确告诉用户：
+
+> 正在扫描 C 盘，预计 1–3 分钟（WinSxS 与 AppData 较慢）。期间控制台可能没有输出，这是正常的，请耐心等待。
+
+扫描开始后，进度会写入 `<技能目录>\output\c_junk_scan_progress.txt`，每完成一个目录追加一行。**不要因为控制台没输出就判断卡死**——提权子进程的 stdout 不会回传，进度只看这个文件。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "<技能目录>\scripts\scan-c-junk.ps1"
 ```
@@ -28,6 +36,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<技能目录>\scripts\scan
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-OutFile` | `<技能目录>\output\c_junk_scan.txt` | 报告路径。默认值在提权**之前**解析成绝对路径再传给子进程，所以提权后也不会落到管理员账户目录或系统盘 |
+| `-ProgressFile` | `<技能目录>\output\c_junk_scan_progress.txt` | 进度文件；每完成一个目录追加一行，扫描期间可随时 `read` |
 | `-NoElevate` | 关 | 不提权，受保护路径标「无权限」 |
 | `-TopN` | 15 | AppData 下目录排行条数 |
 
@@ -83,6 +92,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<技能目录>\scripts\clea
 |---|---|
 | UAC 弹窗一过就 `The operation was canceled by the user` | 提权被取消；重试，或让用户开管理员终端手动跑 |
 | 提权后读不到报告 | 子进程的 stdout 不会回传给父进程；一律读 `output\` 下的 UTF-8 文件 |
+| 控制台长时间无输出，像卡住 | 正常。提权子进程 stdout 不回传；读 `output\c_junk_scan_progress.txt`，每完成一个目录会追加一行 |
 | 报告别写进 C: | 默认已在技能目录 `output\`；`-OutFile` 指到系统盘就是给自己造垃圾 |
 | 控制台中文乱码 | 控制台 GBK；只信 UTF-8 报告文件 |
 | 目录大小比 `资源管理器` 大/小很多 | 硬链接、重解析点、稀疏文件差异；脚本已跳过 reparse point |

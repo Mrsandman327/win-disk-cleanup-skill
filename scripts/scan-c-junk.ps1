@@ -27,6 +27,7 @@
 [CmdletBinding()]
 param(
     [string]$OutFile = '',
+    [string]$ProgressFile = '',
     [switch]$NoElevate,
     [int]$TopN = 15
 )
@@ -37,15 +38,39 @@ $ErrorActionPreference = 'SilentlyContinue'
 if (-not $OutFile) {
     $OutFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'output\c_junk_scan.txt'
 }
+if (-not $ProgressFile) {
+    $ProgressFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'output\c_junk_scan_progress.txt'
+}
 
 $lines = New-Object 'System.Collections.Generic.List[string]'
 function Add-Line { param([string]$Text) $lines.Add($Text) }
 function Fmt-MB { param($Bytes) if ($null -eq $Bytes) { '    n/a' } else { '{0,9:N1} MB' -f ([double]$Bytes / 1MB) } }
 
+function Reset-Progress {
+    try {
+        $dir = Split-Path -Path $ProgressFile -Parent
+        if ($dir -and -not [System.IO.Directory]::Exists($dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        [System.IO.File]::WriteAllText($ProgressFile, '', (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Write-Progress-Line {
+    param([string]$Message)
+    $line = ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message)
+    try {
+        [System.IO.File]::AppendAllText($ProgressFile, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+    Write-Host $line
+}
+
 # ---------------------------------------------------------------- 大小测量
 # 用 .NET 枚举，跳过 reparse point（junction / 符号链接），避免 C:\Users 被重复统计
 function Measure-Dir {
-    param([string]$Path)
+    param([string]$Path, [string]$Label = '')
+
+    if ($Label) { Write-Progress-Line ('扫描: ' + $Label) }
 
     if (-not [System.IO.Directory]::Exists($Path)) {
         return [pscustomobject]@{ Size = $null; Status = 'missing' }
@@ -57,6 +82,7 @@ function Measure-Dir {
     }
 
     $total = [double]0
+    $fileCount = 0
     $stack = New-Object 'System.Collections.Stack'
     $stack.Push($Path)
     while ($stack.Count -gt 0) {
@@ -64,6 +90,10 @@ function Measure-Dir {
         try {
             foreach ($f in [System.IO.Directory]::EnumerateFiles($dir)) {
                 try { $total += (New-Object System.IO.FileInfo $f).Length } catch { }
+                $fileCount++
+                if (($fileCount % 5000) -eq 0) {
+                    Write-Progress-Line ('  ...已统计 {0:N0} 个文件 ({1})' -f $fileCount, $Label)
+                }
             }
         } catch { }
         try {
@@ -92,9 +122,17 @@ $isAdmin = (New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin -and -not $NoElevate) {
+    Write-Host '正在扫描 C 盘，预计 1–3 分钟，请耐心等待。期间控制台可能没有输出，这是正常的。'
     Write-Host '需要管理员权限，正在提权（请在 UAC 窗口点「是」）...'
+    try {
+        [System.IO.File]::WriteAllText(
+            $ProgressFile,
+            ('[{0}] 等待管理员权限（UAC 请点「是」）...' -f (Get-Date -Format 'HH:mm:ss')) + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+    } catch { }
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"",
-                 '-OutFile', "`"$OutFile`"", '-TopN', [string]$TopN)
+                 '-OutFile', "`"$OutFile`"", '-ProgressFile', "`"$ProgressFile`"", '-TopN', [string]$TopN)
     try {
         Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList $argList
     } catch {
@@ -110,10 +148,16 @@ if (-not $isAdmin -and -not $NoElevate) {
     exit
 }
 
+# ---------------------------------------------------------------- 进度
+Reset-Progress
+Write-Progress-Line '开始扫描 C 盘（预计 1–3 分钟，请耐心等待）'
+
 # ---------------------------------------------------------------- 报告头
 Add-Line ('扫描时间    : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Add-Line ('主机        : ' + $env:COMPUTERNAME + ' / ' + $env:USERNAME)
 Add-Line ('权限        : ' + $(if ($isAdmin) { '管理员（受保护路径可读）' } else { '普通用户（部分路径标为无权限）' }))
+Write-Progress-Line '阶段 1/6：磁盘概况'
+
 Add-Line ''
 Add-Line '===== 磁盘概况 ====='
 Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
@@ -171,10 +215,12 @@ $forbidden = @(
 $safeTotal = [double]0
 $rebuildTotal = [double]0
 
+Write-Progress-Line '阶段 2/6：可安全删除'
+
 Add-Line ''
 Add-Line '===== 一、可安全删除（零副作用）====='
 foreach ($t in $safe) {
-    $m = Measure-Dir $t.Path
+    $m = Measure-Dir $t.Path -Label $t.Name
     if ($m.Status -eq 'ok') {
         $safeTotal += $m.Size
         Add-Line ('  {0}  {1}  {2}' -f (Fmt-MB $m.Size), $t.Name.PadRight(30), $t.Path)
@@ -186,10 +232,12 @@ foreach ($t in $safe) {
 }
 Add-Line ('  --- 小计: {0}' -f (Fmt-MB $safeTotal))
 
+Write-Progress-Line '阶段 3/6：缓存/残留'
+
 Add-Line ''
 Add-Line '===== 二、缓存/残留（删除后会重建或需重下，按需）====='
 foreach ($t in $rebuild) {
-    $m = Measure-Dir $t.Path
+    $m = Measure-Dir $t.Path -Label $t.Name
     if ($m.Status -eq 'ok') {
         $rebuildTotal += $m.Size
         Add-Line ('  {0}  {1}  {2}' -f (Fmt-MB $m.Size), $t.Name.PadRight(30), $t.Path)
@@ -199,16 +247,20 @@ foreach ($t in $rebuild) {
 }
 Add-Line ('  --- 小计: {0}' -f (Fmt-MB $rebuildTotal))
 
+Write-Progress-Line '阶段 4/6：禁止手工删除'
+
 Add-Line ''
 Add-Line '===== 三、禁止手工删除 ====='
 foreach ($t in $forbidden) {
-    $m = Measure-Dir $t.Path
+    $m = Measure-Dir $t.Path -Label $t.Name
     Add-Line ('  {0}  {1}' -f (Fmt-MB $m.Size), $t.Name)
 }
 Add-Line '  说明：WinSxS 数值因硬链接虚高，只能用 DISM /StartComponentCleanup 清理；'
 Add-Line '        Installer 与 Package Cache 删除后软件无法修复/卸载。详见 references/junk-catalog.md'
 
 # ---------------------------------------------------------------- 大文件与根目录
+Write-Progress-Line '阶段 5/6：系统级大文件与一级目录'
+
 Add-Line ''
 Add-Line '===== 四、系统级大文件 ====='
 $bigFiles = 'C:\hiberfil.sys', 'C:\pagefile.sys', 'C:\swapfile.sys', 'C:\Windows\MEMORY.DMP'
@@ -224,7 +276,7 @@ Add-Line '===== 五、系统盘一级目录 ====='
 $roots = 'C:\Windows', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData', 'C:\Users', 'C:\Windows\Installer', 'C:\Windows\WinSxS'
 $rootRows = @()
 foreach ($r in $roots) {
-    $m = Measure-Dir $r
+    $m = Measure-Dir $r -Label $r
     if ($m.Status -eq 'ok') { $rootRows += [pscustomobject]@{ Name = $r; Size = $m.Size } }
 }
 $rootRows | Sort-Object Size -Descending | ForEach-Object {
@@ -232,10 +284,12 @@ $rootRows | Sort-Object Size -Descending | ForEach-Object {
 }
 
 Add-Line ''
-$rb = Measure-Dir 'C:\$Recycle.Bin'
+$rb = Measure-Dir 'C:\$Recycle.Bin' -Label '回收站'
 Add-Line ('回收站: {0}' -f (Fmt-MB $rb.Size))
 
 # ---------------------------------------------------------------- 用户级排名
+Write-Progress-Line '阶段 6/6：用户级目录排行（最慢）'
+
 Add-Line ''
 Add-Line ('===== 六、用户级目录占用 Top {0} =====' -f $TopN)
 foreach ($base in @((Join-Path $env:LOCALAPPDATA ''), (Join-Path $env:APPDATA ''))) {
@@ -243,7 +297,7 @@ foreach ($base in @((Join-Path $env:LOCALAPPDATA ''), (Join-Path $env:APPDATA ''
     $rows = @()
     Get-ChildItem -LiteralPath $base -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
         if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
-        $m = Measure-Dir $_.FullName
+        $m = Measure-Dir $_.FullName -Label ('Top: ' + $_.Name)
         if ($m.Status -eq 'ok' -and $m.Size -gt 50MB) {
             $rows += [pscustomobject]@{ Name = $_.Name; Size = $m.Size }
         }
@@ -260,13 +314,17 @@ Add-Line ('  可安全删除合计 : {0}' -f (Fmt-MB $safeTotal))
 Add-Line ('  缓存类合计     : {0}' -f (Fmt-MB $rebuildTotal))
 Add-Line ('  报告路径       : {0}' -f $OutFile)
 
+Write-Progress-Line '扫描完成，正在写入报告...'
+
 try {
     $outDir = Split-Path -Path $OutFile -Parent
     if ($outDir -and -not [System.IO.Directory]::Exists($outDir)) {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
     $lines | Set-Content -LiteralPath $OutFile -Encoding UTF8
+    Write-Progress-Line ('完成，报告: ' + $OutFile)
 } catch {
+    Write-Progress-Line ('写入报告失败: ' + $_.Exception.Message)
     Write-Host ('无法写入报告: ' + $_.Exception.Message)
     exit 1
 }

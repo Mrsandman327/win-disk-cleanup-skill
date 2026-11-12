@@ -58,6 +58,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan-c-junk.ps1
 
 脚本在非管理员下**自动请求提权**（UAC 点「是」）。整轮约 **1~3 分钟**（WinSxS 与 AppData 最慢），不要中断。
 
+> 扫描期间控制台可能长时间没有输出，**这是正常的**：提权子进程的 stdout 不会回传。进度写入 `output\c_junk_scan_progress.txt`，每完成一个目录追加一行；不要因为控制台没动静就判断卡死。
+
 不想弹 UAC、只扫用户级路径：
 
 ```powershell
@@ -67,6 +69,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan-c-junk.ps1
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-OutFile` | `<技能目录>\output\c_junk_scan.txt` | 报告路径。默认值在**提权之前**解析成绝对路径再传给子进程 |
+| `-ProgressFile` | `<技能目录>\output\c_junk_scan_progress.txt` | 进度文件；每完成一个目录追加一行，扫描期间可随时查看 |
 | `-NoElevate` | 关 | 不提权，受保护路径标「无权限」 |
 | `-TopN` | 15 | AppData 目录排行条数 |
 
